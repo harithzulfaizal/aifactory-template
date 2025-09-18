@@ -1,0 +1,47 @@
+
+# RAG Configuration
+ingestion:
+  source_type: local
+  file_types: ["pdf", "docx"]
+  recursive: True
+  encoding: utf-8
+  chunking:
+    method: fixed
+    chunk_size: 512
+    overlap: 50
+  metadata:
+    include: ["file_name", "file_type", "page_number", "created_date"]
+  embeddings:
+    model: text-embedding-ada-002
+    dimension: 1536
+
+vector_db:
+  type: azure_search
+  uri: https://mysearch.windows.net
+  index_name: my_index
+  distance_metric: cosine
+  dynamic_fields: True
+
+query:
+  retrieval_type: semantic
+  top_k: 5
+  filters: {"file_type": "pdf"}
+  reranker: bm25
+  prompt_template: Answer based on context: {context}
+Question: {question}
+  context_window: 2048
+  answer_style: detailed
+
+
+extraction:
+  schema: [{"description": null, "field": "invoice_number", "type": "string"}, {"description": null, "field": "amount", "type": "float"}]
+  granularity: document
+  output_format: json
+
+
+orchestration:
+  llm_provider: azure_openai
+  llm_model: gpt-4
+  temperature: 0.2
+  max_tokens: 1024
+  api_key: AZURE_API_KEY
