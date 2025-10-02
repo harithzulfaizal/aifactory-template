@@ -92,14 +92,8 @@ class SemanticSearch:
             # Prepare context from search results
             context = self._prepare_context(search_results)
             
-            # Use prompt template if available, otherwise use default
-            if self.query_config.prompt_template:
-                prompt = self.query_config.prompt_template.format(
-                    context=context,
-                    question=question
-                )
-            else:
-                prompt = f"""
+            # Use default prompt template
+            prompt = f"""
 Based on the following context, please answer the question. If the context doesn't contain enough information to answer the question, please say so.
 
 Context:
@@ -195,34 +189,10 @@ Answer:
         results: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
         """Rerank search results using cross-encoder or other methods"""
-        if self.query_config.reranker == "bm25":
-            # Implement BM25 reranking if available
-            pass
-        elif self.query_config.reranker == "cross-encoder":
-            # Implement cross-encoder reranking if available
+        if self.query_config.reranker:
+            # Implement reranking if enabled (could be BM25, cross-encoder, etc.)
+            # For now, return results as-is
             pass
         
-        # For now, return results as-is
+        # Return results as-is
         return results
-    
-    async def get_answer_style(self, base_answer: str) -> str:
-        """Format answer according to configured style"""
-        style = self.query_config.answer_style or "concise"
-        
-        if style == "concise":
-            # Ensure answer is concise
-            if len(base_answer) > 500:
-                sentences = base_answer.split('. ')
-                if len(sentences) > 3:
-                    base_answer = '. '.join(sentences[:3]) + '.'
-        
-        elif style == "detailed":
-            # Add more detail if needed
-            pass
-        
-        elif style == "json":
-            # Format as JSON
-            import json
-            base_answer = json.dumps({"answer": base_answer}, indent=2)
-        
-        return base_answer

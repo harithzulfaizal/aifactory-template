@@ -5,6 +5,7 @@ from azure.search.documents.indexes.models import (
     SearchIndex, 
     SimpleField, 
     SearchableField, 
+    SearchField,
     SearchFieldDataType,
     VectorSearch,
     VectorSearchAlgorithmConfiguration,
@@ -26,33 +27,37 @@ class AzureAISearch(VectorDBBase):
     
     def __init__(self, config, embedding_service):
         super().__init__(config, embedding_service)
-        self.azure_config = config.azure_search
-        self.endpoint = self.azure_config.endpoint
-        self.api_key = self.azure_config.api_key
         self.index_name = config.index_name
+        
+        import os
+        self.endpoint = os.getenv("AZURE_SEARCH_ENDPOINT")
+        self.api_key = os.getenv("AZURE_SEARCH_API_KEY")
+        self.api_version = os.getenv("AZURE_SEARCH_API_VERSION", "2024-07-01")
+        
+        if not self.endpoint:
+            raise ValueError("AZURE_SEARCH_ENDPOINT environment variable is required")
+        if not self.api_key:
+            raise ValueError("AZURE_SEARCH_API_KEY environment variable is required")
+        
         self.credential = AzureKeyCredential(self.api_key)
         
-        # Initialize clients
         self.index_client = SearchIndexClient(
             endpoint=self.endpoint, 
             credential=self.credential
         )
         self.search_client = None
         
-        # Initialize the index
         self._initialize_index()
     
     def _initialize_index(self):
         """Initialize or create the search index"""
         try:
-            # Check if index exists
             existing_indexes = list(self.index_client.list_indexes())
             index_exists = any(index.name == self.index_name for index in existing_indexes)
             
             if not index_exists:
                 self._create_index()
             
-            # Initialize search client
             self.search_client = SearchClient(
                 endpoint=self.endpoint,
                 index_name=self.index_name,
@@ -67,27 +72,79 @@ class AzureAISearch(VectorDBBase):
         """Create a new search index"""
         embedding_dimension = self.embedding_service.get_embedding_dimension()
         
-        # Define fields
-        fields = [
+        {# default_fields = [
             SimpleField(name="id", type=SearchFieldDataType.String, key=True),
             SearchableField(name="content", type=SearchFieldDataType.String, analyzer_name="standard.lucene"),
             SimpleField(name="document_id", type=SearchFieldDataType.String, facetable=True, filterable=True),
             SimpleField(name="filename", type=SearchFieldDataType.String, facetable=True, filterable=True),
             SimpleField(name="file_type", type=SearchFieldDataType.String, facetable=True, filterable=True),
             SimpleField(name="chunk_index", type=SearchFieldDataType.Int32, facetable=True, filterable=True),
-            SimpleField(name="page", type=SearchFieldDataType.Int32, facetable=True, filterable=True),
-            SimpleField(name="title", type=SearchFieldDataType.String, facetable=True, filterable=True),
             SimpleField(name="source", type=SearchFieldDataType.String, facetable=True, filterable=True),
-            SearchField(
-                name="content_vector",
-                type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
-                searchable=True,
-                vector_search_dimensions=embedding_dimension,
-                vector_search_profile_name="my-vector-config"
-            ),
+        ] #}
+        
+
+        required_metadata_fields = [
+            {"name": "title", "type": "string"},
+            {"name": "page", "type": "integer"}, 
+            {"name": "content", "type": "string"},
+            {"name": "content_vector", "type": "list"},
+            {"name": "created_at", "type": "date"},
+            {"name": "updated_at", "type": "date"}
         ]
         
-        # Configure vector search
+        user_metadata_fields = [
+            {% for field in config.ingestion.metadata.fields %}
+            {"name": "{{ field.name }}", "type": "{{ field.type.value }}"}{{ "," if not loop.last }}
+            {% endfor %}
+        ] if hasattr(self.config.ingestion.metadata, 'fields') and self.config.ingestion.metadata.fields else []
+        
+        all_metadata_fields = required_metadata_fields.copy()
+        seen_fields = {field["name"] for field in required_metadata_fields}
+        
+        {% for field in config.ingestion.metadata.fields %}
+        if "{{ field.name }}" not in seen_fields:
+            all_metadata_fields.append({"name": "{{ field.name }}", "type": "{{ field.type.value }}"})
+            seen_fields.add("{{ field.name }}")
+        {% endfor %}
+        
+        metadata_fields = []
+        for field_config in all_metadata_fields:
+            field_name = field_config["name"]
+            field_type = field_config["type"]
+            
+            if field_name == "content_vector":
+                continue
+                
+            if field_name == "content":
+                continue
+                
+            # Map field types to Azure Search types
+            if field_type == "string":
+                if field_name == "title":
+                    metadata_fields.append(SearchableField(name=field_name, type=SearchFieldDataType.String, facetable=True, filterable=True))
+                else:
+                    metadata_fields.append(SimpleField(name=field_name, type=SearchFieldDataType.String, facetable=True, filterable=True))
+            elif field_type == "integer":
+                metadata_fields.append(SimpleField(name=field_name, type=SearchFieldDataType.Int32, facetable=True, filterable=True))
+            elif field_type == "float":
+                metadata_fields.append(SimpleField(name=field_name, type=SearchFieldDataType.Double, facetable=True, filterable=True))
+            elif field_type == "boolean":
+                metadata_fields.append(SimpleField(name=field_name, type=SearchFieldDataType.Boolean, facetable=True, filterable=True))
+            elif field_type == "date":
+                metadata_fields.append(SimpleField(name=field_name, type=SearchFieldDataType.DateTimeOffset, facetable=True, filterable=True))
+            elif field_type == "list":
+                metadata_fields.append(SearchField(name=field_name, type=SearchFieldDataType.Collection(SearchFieldDataType.String), facetable=True, filterable=True))
+        
+        vector_field = SearchField(
+            name="content_vector",
+            type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
+            searchable=True,
+            vector_search_dimensions=embedding_dimension,
+            vector_search_profile_name="my-vector-config"
+        )
+        
+        fields = default_fields + metadata_fields + [vector_field]
+        
         vector_search = VectorSearch(
             algorithms=[
                 HnswAlgorithmConfiguration(
@@ -116,14 +173,14 @@ class AzureAISearch(VectorDBBase):
             ]
         )
         
-        # Configure semantic search if available
         semantic_search = None
-        if self.azure_config.semantic_configuration:
+        semantic_config_name = os.getenv("AZURE_SEARCH_SEMANTIC_CONFIGURATION")
+        if semantic_config_name:
             semantic_search = SemanticSearch(
-                default_configuration_name=self.azure_config.semantic_configuration,
+                default_configuration_name=semantic_config_name,
                 configurations=[
                     SemanticConfiguration(
-                        name=self.azure_config.semantic_configuration,
+                        name=semantic_config_name,
                         prioritized_fields=SemanticPrioritizedFields(
                             title_field=SemanticField(field_name="title"),
                             content_fields=[SemanticField(field_name="content")]
@@ -132,7 +189,6 @@ class AzureAISearch(VectorDBBase):
                 ]
             )
         
-        # Create index
         index = SearchIndex(
             name=self.index_name,
             fields=fields,
@@ -159,6 +215,8 @@ class AzureAISearch(VectorDBBase):
                 for i, (chunk, embedded_chunk) in enumerate(zip(prepared_chunks, embedded_chunks)):
                     doc_id = f"{doc.get('filename', 'doc')}_{i}"
                     
+                    #TODO: make this dynamic to metadata fields/AI Search schema
+                    # Build document with dynamic metadata fields
                     document = {
                         "id": doc_id,
                         "content": chunk['content'],
@@ -167,10 +225,25 @@ class AzureAISearch(VectorDBBase):
                         "filename": chunk['metadata'].get('filename'),
                         "file_type": chunk['metadata'].get('file_type'),
                         "chunk_index": chunk['metadata'].get('chunk_index'),
-                        "page": chunk['metadata'].get('page'),
-                        "title": chunk['metadata'].get('title'),
                         "source": chunk['metadata'].get('source', 'upload')
                     }
+                    
+                    # Add required default metadata fields
+                    document["title"] = chunk['metadata'].get('title')
+                    document["page"] = chunk['metadata'].get('page')
+                    
+                    # Add timestamp fields
+                    from datetime import datetime
+                    now = datetime.utcnow().isoformat()
+                    document["created_at"] = chunk['metadata'].get('created_at', now)
+                    document["updated_at"] = now
+                    
+                    # Add user-defined metadata fields
+                    {% for field in config.ingestion.metadata.fields %}
+                    {% if field.name not in ['title', 'page', 'content', 'content_vector', 'created_at', 'updated_at'] %}
+                    document["{{ field.name }}"] = chunk['metadata'].get('{{ field.name }}')
+                    {% endif %}
+                    {% endfor %}
                     
                     documents_to_upload.append(document)
             
@@ -235,19 +308,31 @@ class AzureAISearch(VectorDBBase):
             # Format results
             formatted_results = []
             for result in results:
+                # Build metadata with required default fields
+                metadata = {
+                    "document_id": result.get("document_id"),
+                    "filename": result.get("filename"),
+                    "file_type": result.get("file_type"),
+                    "chunk_index": result.get("chunk_index"),
+                    "source": result.get("source"),
+                    "title": result.get("title"),
+                    "page": result.get("page"),
+                    "created_at": result.get("created_at"),
+                    "updated_at": result.get("updated_at")
+                }
+                
+                # Add user-defined metadata fields
+                {% for field in config.ingestion.metadata.fields %}
+                {% if field.name not in ['title', 'page', 'content', 'content_vector', 'created_at', 'updated_at'] %}
+                metadata["{{ field.name }}"] = result.get("{{ field.name }}")
+                {% endif %}
+                {% endfor %}
+                
                 formatted_result = {
                     "id": result.get("id"),
                     "content": result.get("content"),
                     "score": result.get("@search.score"),
-                    "metadata": {
-                        "document_id": result.get("document_id"),
-                        "filename": result.get("filename"),
-                        "file_type": result.get("file_type"),
-                        "chunk_index": result.get("chunk_index"),
-                        "page": result.get("page"),
-                        "title": result.get("title"),
-                        "source": result.get("source")
-                    }
+                    "metadata": metadata
                 }
                 formatted_results.append(formatted_result)
             
@@ -270,9 +355,21 @@ class AzureAISearch(VectorDBBase):
     async def list_documents(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
         """List documents in the database"""
         try:
+            # Build select clause with all metadata fields
+            select_fields = ["id", "filename", "document_id", "file_type", "chunk_index", "source", "title", "page", "created_at", "updated_at"]
+            
+            # Add user-defined metadata fields to select
+            {% for field in config.ingestion.metadata.fields %}
+            {% if field.name not in ['title', 'page', 'content', 'content_vector', 'created_at', 'updated_at'] %}
+            select_fields.append("{{ field.name }}")
+            {% endif %}
+            {% endfor %}
+            
+            select_clause = ",".join(select_fields)
+            
             results = self.search_client.search(
                 search_text="*",
-                select="id,filename,document_id,file_type,chunk_index,page,title,source",
+                select=select_clause,
                 top=limit,
                 skip=offset,
                 include_total_count=True
@@ -280,16 +377,28 @@ class AzureAISearch(VectorDBBase):
             
             documents = []
             for result in results:
-                documents.append({
+                # Build document with required default fields
+                document = {
                     "id": result.get("id"),
                     "filename": result.get("filename"),
                     "document_id": result.get("document_id"),
                     "file_type": result.get("file_type"),
                     "chunk_index": result.get("chunk_index"),
-                    "page": result.get("page"),
+                    "source": result.get("source"),
                     "title": result.get("title"),
-                    "source": result.get("source")
-                })
+                    "page": result.get("page"),
+                    "created_at": result.get("created_at"),
+                    "updated_at": result.get("updated_at")
+                }
+                
+                # Add user-defined metadata fields
+                {% for field in config.ingestion.metadata.fields %}
+                {% if field.name not in ['title', 'page', 'content', 'content_vector', 'created_at', 'updated_at'] %}
+                document["{{ field.name }}"] = result.get("{{ field.name }}")
+                {% endif %}
+                {% endfor %}
+                
+                documents.append(document)
             
             return documents
             
@@ -321,4 +430,3 @@ class AzureAISearch(VectorDBBase):
         except Exception as e:
             print(f"Error getting statistics: {str(e)}")
             return {}
-

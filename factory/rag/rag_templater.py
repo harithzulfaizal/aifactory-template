@@ -1,5 +1,5 @@
 import os
-import uuid
+import time
 
 from jinja2 import Environment, FileSystemLoader
 
@@ -7,7 +7,7 @@ from app.schemas.rag_models import RAGConfig
 
 
 def generate_rag_template(config: RAGConfig) -> str:
-    folder_name = f"rag_template_{uuid.uuid4().hex[:8]}"
+    folder_name = f"rag_template_{int(time.time())}"
     folder_path = os.path.join(os.path.dirname(__file__), "output", folder_name)
     os.makedirs(folder_path, exist_ok=True)
 
@@ -89,13 +89,9 @@ def generate_rag_template(config: RAGConfig) -> str:
     with open(os.path.join(folder_path, "vector_db", "base.py"), "w") as f:
         f.write(vector_db_base_content)
 
-    azure_search_content = env.get_template("azure_search.py.j2").render()
+    azure_search_content = env.get_template("azure_search.py.j2").render(config=config)
     with open(os.path.join(folder_path, "vector_db", "azure_search.py"), "w") as f:
         f.write(azure_search_content)
-
-    chroma_db_content = env.get_template("chroma_db.py.j2").render()
-    with open(os.path.join(folder_path, "vector_db", "chroma_db.py"), "w") as f:
-        f.write(chroma_db_content)
 
     vector_db_factory_content = env.get_template("vector_db_factory.py.j2").render()
     with open(os.path.join(folder_path, "vector_db", "factory.py"), "w") as f:

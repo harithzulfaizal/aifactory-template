@@ -15,14 +15,13 @@ class EmbeddingService:
     
     def _initialize_client(self):
         """Initialize the OpenAI client based on configuration"""
-        # Determine if using Azure OpenAI
-        azure_endpoint = self.config.azure_endpoint or get_env_var('AZURE_OPENAI_ENDPOINT')
+        # Use Azure OpenAI by default
+        azure_endpoint = get_env_var('AZURE_OPENAI_ENDPOINT')
+        api_key = get_env_var('AZURE_OPENAI_API_KEY')
+        api_version = get_env_var('AZURE_OPENAI_API_VERSION', '2024-02-15-preview')
         
-        if azure_endpoint:
+        if azure_endpoint and api_key:
             # Use Azure OpenAI
-            api_key = get_env_var('AZURE_OPENAI_API_KEY')
-            api_version = self.config.api_version
-            
             self.client = openai.AzureOpenAI(
                 azure_endpoint=azure_endpoint,
                 api_key=api_key,
@@ -30,8 +29,10 @@ class EmbeddingService:
             )
         else:
             # Use standard OpenAI
-            api_key = get_env_var('OPENAI_API_KEY')
-            self.client = openai.OpenAI(api_key=api_key)
+            openai_key = get_env_var('OPENAI_API_KEY')
+            if not openai_key:
+                raise ValueError("Either AZURE_OPENAI_ENDPOINT/AZURE_OPENAI_API_KEY or OPENAI_API_KEY must be set")
+            self.client = openai.OpenAI(api_key=openai_key)
     
     async def generate_embedding(self, text: str) -> List[float]:
         """Generate embedding for a single text"""

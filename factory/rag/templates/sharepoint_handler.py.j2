@@ -47,8 +47,6 @@ class SharePointHandler:
     
     async def _get_access_token(self):
         """Get Microsoft Graph access token using client credentials flow"""
-        # This would be implemented with actual SharePoint configuration
-        # For now, this is a placeholder that would need real implementation
         config = self._get_sharepoint_config()
         
         authority = f"https://login.microsoftonline.com/{config['tenant_id']}"
@@ -70,18 +68,15 @@ class SharePointHandler:
         """Fetch document list from SharePoint"""
         config = self._get_sharepoint_config()
         
-        # Construct Graph API URL
         site_url = config['site_url']
         folder_path = config.get('folder_path', '')
         
-        # Get site ID (simplified - would need actual implementation)
         headers = {
             'Authorization': f'Bearer {self.access_token}',
             'Content-Type': 'application/json'
         }
         
-        # This is a simplified implementation
-        # Real implementation would need proper site discovery and folder traversal
+        # TODO: site traversal
         graph_url = f"https://graph.microsoft.com/v1.0/sites/{site_url}/drive/root/children"
         
         response = requests.get(graph_url, headers=headers)

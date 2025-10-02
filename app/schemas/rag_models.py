@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 class DocumentSourceType(str, Enum):
     UPLOAD = "upload"
     SHAREPOINT = "sharepoint"
-    LOCAL = "local"
+    BOTH = "both"
 
 
 class FieldType(str, Enum):
@@ -24,6 +24,9 @@ class MetadataField(BaseModel):
     type: FieldType = Field(..., description="Field data type")
     description: Optional[str] = Field(None, description="Field description")
     auto_extract: bool = Field(False, description="Auto-extract from document")
+    extract_prompt_template: Optional[str] | None = Field(
+        None, description="Custom prompt template for extraction"
+    )
     default_value: Optional[Any] = Field(None, description="Default value if not found")
     required: bool = Field(False, description="Whether this field is required")
 
@@ -42,26 +45,29 @@ class MetadataConfig(BaseModel):
             MetadataField(
                 name="title",
                 type=FieldType.STRING,
-                auto_extract=True,
+                auto_extract=False,
                 description="Document title",
                 default_value=None,
-                required=False,
+                required=True,
+                extract_prompt_template=None,
             ),
             MetadataField(
                 name="page",
                 type=FieldType.INTEGER,
-                auto_extract=True,
+                auto_extract=False,
                 description="Page number",
                 default_value=None,
                 required=False,
+                extract_prompt_template=None,
             ),
             MetadataField(
                 name="content",
                 type=FieldType.STRING,
-                auto_extract=True,
+                auto_extract=False,
                 description="Document content",
                 default_value=None,
                 required=True,
+                extract_prompt_template=None,
             ),
             MetadataField(
                 name="content_vector",
@@ -69,22 +75,20 @@ class MetadataConfig(BaseModel):
                 auto_extract=False,
                 description="Content vector embeddings",
                 default_value=None,
-                required=False,
+                required=True,
+                extract_prompt_template=None,
             ),
         ],
         description="Metadata fields schema",
     )
 
 
+class LLMConfig(BaseModel):
+    model: str = Field(..., description="Azure OpenAI large language model name")
+
+
 class EmbeddingConfig(BaseModel):
     model: str = Field(..., description="Azure OpenAI embedding model name")
-    dimension: Optional[int] = Field(
-        None, description="Vector dimension (auto-detected for Azure OpenAI)"
-    )
-    azure_endpoint: Optional[str] = Field(None, description="Azure OpenAI endpoint")
-    api_version: str = Field(
-        "2024-02-15-preview", description="Azure OpenAI API version"
-    )
 
 
 class SharePointConfig(BaseModel):
@@ -100,10 +104,6 @@ class SharePointConfig(BaseModel):
 
 class IngestionConfig(BaseModel):
     source_type: DocumentSourceType = Field(..., description="Document source type")
-    file_types: List[str] = Field(
-        default=["pdf", "docx", "txt", "png", "jpeg"],
-        description="Supported file types",
-    )
     sharepoint: Optional[SharePointConfig] = Field(
         None, description="SharePoint configuration"
     )
@@ -112,42 +112,12 @@ class IngestionConfig(BaseModel):
     embeddings: EmbeddingConfig
 
 
-class AzureAISearchConfig(BaseModel):
-    endpoint: str = Field(..., description="Azure AI Search endpoint")
-    api_key: str = Field(..., description="Azure AI Search admin key")
-    api_version: str = Field("2024-07-01", description="Azure AI Search API version")
-    semantic_configuration: Optional[str] = Field(
-        None, description="Semantic search configuration name"
-    )
-
-
-class ChromaDBConfig(BaseModel):
-    persist_directory: Optional[str] = Field(
-        "./chroma_db", description="Local storage directory"
-    )
-    host: Optional[str] = Field(None, description="Chroma server host")
-    port: Optional[int] = Field(None, description="Chroma server port")
-    ssl: bool = Field(False, description="Use SSL for remote connection")
-
-
 class VectorDBConfig(BaseModel):
-    type: Literal["azure_search", "chroma", "pinecone", "weaviate"] = Field(
-        ..., description="Vector DB type"
-    )
+    type: Literal["azure_search"] = Field("azure_search", description="Vector DB type")
     index_name: str = Field(..., description="Index/collection name")
     distance_metric: Literal["cosine", "dot_product", "euclidean"] = Field(
         "cosine", description="Similarity metric"
     )
-    dynamic_fields: bool = Field(
-        False, description="Enable dynamic schema (JSON schema/programmatic)"
-    )
-    azure_search: Optional[AzureAISearchConfig] = Field(
-        None, description="Azure AI Search configuration"
-    )
-    chroma: Optional[ChromaDBConfig] = Field(
-        None, description="Chroma DB configuration"
-    )
-    uri: Optional[str] = Field(None, description="Legacy connection string / URI")
 
 
 class QueryConfig(BaseModel):
@@ -158,45 +128,11 @@ class QueryConfig(BaseModel):
     filters: Optional[Dict[str, Any]] = Field(
         None, description="Metadata filters (e.g. {file_type: pdf})"
     )
-    reranker: Optional[str] = Field(
-        None, description="Reranker method (bm25, cross-encoder, etc.)"
-    )
-    prompt_template: Optional[str] = Field(
-        None, description="Template for prompt injection"
+    reranker: bool = Field(
+        False, description="Enable reranker (bm25, cross-encoder, etc.)"
     )
     context_window: Optional[int] = Field(
         2048, description="Max tokens per query context"
-    )
-    answer_style: Optional[str] = Field(
-        "concise", description="Answer style: concise, detailed, JSON, etc."
-    )
-
-
-class ExtractionField(BaseModel):
-    field: str
-    type: str
-    description: Optional[str] = None
-
-
-class ExtractionConfig(BaseModel):
-    schema: List[ExtractionField] = Field(
-        default_factory=list, description="Schema definition for extracted fields"
-    )
-    granularity: str = Field(
-        "document", description="Extraction level: page, chunk, document"
-    )
-    output_format: str = Field("json", description="Output format: json, csv, etc.")
-
-
-class OrchestrationConfig(BaseModel):
-    llm_provider: str = Field(
-        ..., description="Provider: openai, azure_openai, anthropic, etc."
-    )
-    llm_model: str = Field(..., description="Model name (e.g., gpt-4, llama2-70b)")
-    temperature: float = Field(0.0, description="Sampling temperature")
-    max_tokens: int = Field(1024, description="Maximum tokens for completion")
-    api_key: Optional[str] = Field(
-        None, description="Reference to API key (can be env var)"
     )
 
 
@@ -204,5 +140,3 @@ class RAGConfig(BaseModel):
     ingestion: IngestionConfig
     vector_db: VectorDBConfig
     query: QueryConfig
-    extraction: Optional[ExtractionConfig] = None
-    orchestration: OrchestrationConfig

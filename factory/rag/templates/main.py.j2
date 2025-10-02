@@ -23,8 +23,8 @@ vector_db = VectorDBFactory.create(config.vector_db, embedding_service)
 document_processor = DocumentProcessor(config.ingestion)
 
 # Initialize handlers based on source type
-upload_handler = UploadHandler(document_processor, vector_db)
-sharepoint_handler = SharePointHandler(document_processor, vector_db) if config.ingestion.sharepoint else None
+upload_handler = UploadHandler(document_processor, vector_db) if config.ingestion.source_type in ["upload", "both"] else None
+sharepoint_handler = SharePointHandler(document_processor, vector_db) if config.ingestion.source_type in ["sharepoint", "both"] and config.ingestion.sharepoint else None
 semantic_search = SemanticSearch(vector_db, embedding_service, config.query)
 
 app = FastAPI(
@@ -68,11 +68,17 @@ async def upload_documents(
     Upload and process documents for ingestion into the vector database.
     Supports PDF, DOCX, TXT, PNG, and JPEG formats.
     """
+    if not upload_handler:
+        raise HTTPException(
+            status_code=400, 
+            detail="Upload not configured. Source type must be 'upload' or 'both'"
+        )
+    
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
     
-    # Validate file types
-    supported_types = config.ingestion.file_types
+    # Validate file types (hardcoded supported types)
+    supported_types = ["pdf", "docx", "txt", "png", "jpeg", "jpg"]
     for file in files:
         file_ext = file.filename.split('.')[-1].lower() if file.filename else ""
         if file_ext not in supported_types:
@@ -105,7 +111,7 @@ async def ingest_sharepoint(background_tasks: BackgroundTasks):
     if not sharepoint_handler:
         raise HTTPException(
             status_code=400, 
-            detail="SharePoint not configured. Please configure SharePoint settings in config.yaml"
+            detail="SharePoint not configured. Source type must be 'sharepoint' or 'both' with valid SharePoint configuration"
         )
     
     try:

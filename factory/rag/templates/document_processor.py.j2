@@ -7,8 +7,10 @@ from docx import Document
 import pytesseract
 from PIL import Image
 import tiktoken
+import openai
 
 from utils.text_splitter import TextSplitter
+from config import get_env_var
 
 
 class DocumentProcessor:
@@ -17,7 +19,21 @@ class DocumentProcessor:
     def __init__(self, ingestion_config):
         self.ingestion_config = ingestion_config
         self.text_splitter = TextSplitter(ingestion_config.chunking)
-        self.encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
+        self.encoding = tiktoken.encoding_for_model("gpt-5")
+        self.llm_client = None
+        self._initialize_llm_client()
+    
+    def _initialize_llm_client(self):
+        """Initialize the LLM client for metadata extraction"""
+        azure_endpoint = get_env_var('AZURE_OPENAI_ENDPOINT')
+        api_key = get_env_var('AZURE_OPENAI_API_KEY')
+        api_version = get_env_var('AZURE_OPENAI_API_VERSION', '2024-02-15-preview')
+        
+        self.llm_client = openai.AzureOpenAI(
+            azure_endpoint=azure_endpoint,
+            api_key=api_key,
+            api_version=api_version
+        )
     
     async def process_document(
         self, 
@@ -28,10 +44,8 @@ class DocumentProcessor:
     ) -> Optional[Dict[str, Any]]:
         """Process a single document and extract text and metadata"""
         try:
-            # Determine file type
             file_ext = Path(filename).suffix.lower().lstrip('.')
-            
-            # Extract text based on file type
+
             if file_ext == 'pdf':
                 text_content = await self._extract_pdf_text(file_path)
             elif file_ext == 'docx':
@@ -48,15 +62,12 @@ class DocumentProcessor:
                 print(f"No text content found in {filename}")
                 return None
             
-            # Extract metadata
             metadata = await self._extract_metadata(
                 file_path, filename, metadata_fields, text_content, additional_metadata
             )
             
-            # Split text into chunks
             chunks = await self.text_splitter.split_text(text_content)
             
-            # Create document object
             document = {
                 'filename': filename,
                 'file_type': file_ext,
@@ -111,7 +122,6 @@ class DocumentProcessor:
             with open(file_path, 'r', encoding='utf-8') as file:
                 return file.read()
         except UnicodeDecodeError:
-            # Try with different encoding
             try:
                 with open(file_path, 'r', encoding='latin-1') as file:
                     return file.read()
@@ -123,18 +133,8 @@ class DocumentProcessor:
             return ""
     
     async def _extract_image_text(self, file_path: str) -> str:
-        """Extract text from image using OCR"""
-        try:
-            image = Image.open(file_path)
-            
-            # Configure Tesseract for better OCR
-            custom_config = r'--oem 3 --psm 6'
-            text = pytesseract.image_to_string(image, config=custom_config)
-            
-            return text.strip()
-        except Exception as e:
-            print(f"Error extracting text from image: {str(e)}")
-            return ""
+        """Extract text from image"""
+        pass
     
     async def _extract_metadata(
         self, 
@@ -166,7 +166,7 @@ class DocumentProcessor:
             
             if auto_extract:
                 extracted_value = await self._auto_extract_field(
-                    field_name, field_type, text_content, metadata
+                    field_name, field_type, text_content, metadata, field
                 )
                 if extracted_value is not None:
                     metadata[field_name] = extracted_value
@@ -180,38 +180,95 @@ class DocumentProcessor:
         field_name: str, 
         field_type: str, 
         text_content: str, 
-        existing_metadata: Dict[str, Any]
+        existing_metadata: Dict[str, Any],
+        field_config: Dict[str, Any]
     ) -> Any:
         """Auto-extract a specific metadata field"""
         try:
-            if field_name == 'title':
-                # Try to extract title from first few lines
-                lines = text_content.split('\\n')[:5]
-                for line in lines:
-                    line = line.strip()
-                    if len(line) > 10 and len(line) < 200:
-                        return line
-                return Path(existing_metadata.get('filename', '')).stem
+            # Check if there's a custom prompt template for LLM extraction
+            extract_prompt_template = field_config.get('extract_prompt_template')
             
-            elif field_name == 'page':
-                # Count pages in PDF or estimate from content
-                if existing_metadata.get('file_type') == 'pdf':
-                    try:
-                        with open(existing_metadata.get('file_path', ''), 'rb') as file:
-                            pdf_reader = PyPDF2.PdfReader(file)
-                            return len(pdf_reader.pages)
-                    except:
-                        pass
-                # Estimate pages based on content length
-                estimated_pages = max(1, len(text_content) // 2000)
-                return estimated_pages
-            
-            elif field_name == 'content':
-                return text_content
-            
-            # Add more auto-extraction logic as needed
-            return None
+            if extract_prompt_template and self.llm_client:
+                # Use LLM for extraction with custom prompt
+                return await self._extract_with_llm(
+                    field_name, field_type, text_content, extract_prompt_template
+                )
             
         except Exception as e:
             print(f"Error auto-extracting field {field_name}: {str(e)}")
             return None
+    
+    async def _extract_with_llm(
+        self, 
+        field_name: str, 
+        field_type: str, 
+        text_content: str, 
+        prompt_template: str
+    ) -> Any:
+        """Extract field value using LLM with custom prompt template"""
+        try:
+            prompt = prompt_template.format(
+                field_name=field_name,
+                field_type=field_type,
+                content=text_content
+            )
+
+            model = get_env_var('LLM_MODEL', 'gpt-5-mini')
+            temperature = float(get_env_var('LLM_TEMPERATURE', '0.1'))  # Lower temperature for extraction
+            max_tokens = int(get_env_var('LLM_MAX_TOKENS', '500'))
+            
+            # Generate response
+            response = self.llm_client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "system", 
+                        "content": f"You are a precise data extractor. Extract the {field_name} field of type {field_type} from the provided document content. Return only the extracted value, nothing else."
+                    },
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+            
+            extracted_value = response.choices[0].message.content.strip()
+            
+            # Convert the extracted value to the appropriate type
+            return self._convert_field_type(extracted_value, field_type)
+            
+        except Exception as e:
+            print(f"Error extracting field {field_name} with LLM: {str(e)}")
+            return None
+    
+    def _convert_field_type(self, value: str, field_type: str) -> Any:
+        """Convert extracted string value to the appropriate field type"""
+        try:
+            if field_type == "string":
+                return value
+            elif field_type == "integer":
+                return int(value)
+            elif field_type == "float":
+                return float(value)
+            elif field_type == "boolean":
+                return value.lower() in ["true", "1", "yes", "on"]
+            elif field_type == "date":
+                from datetime import datetime
+                # Try to parse common date formats
+                for fmt in ["%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%Y-%m-%d %H:%M:%S"]:
+                    try:
+                        return datetime.strptime(value, fmt).isoformat()
+                    except ValueError:
+                        continue
+                return value  # Return as string if parsing fails
+            elif field_type == "list":
+                # Try to parse as JSON list, otherwise return as single item list
+                try:
+                    import json
+                    return json.loads(value)
+                except:
+                    return [value]
+            else:
+                return value
+        except Exception as e:
+            print(f"Error converting field type {field_type}: {str(e)}")
+            return value  # Return original value if conversion fails
