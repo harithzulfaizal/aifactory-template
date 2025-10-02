@@ -1,0 +1,228 @@
+import time
+from typing import List, Dict, Any, Optional
+import openai
+
+from vector_db.base import VectorDBBase
+from utils.embeddings import EmbeddingService
+from config import get_env_var
+
+
+class SemanticSearch:
+    """Handles semantic search and query processing"""
+    
+    def __init__(self, vector_db: VectorDBBase, embedding_service: EmbeddingService, query_config):
+        self.vector_db = vector_db
+        self.embedding_service = embedding_service
+        self.query_config = query_config
+        self.llm_client = None
+        self._initialize_llm_client()
+    
+    def _initialize_llm_client(self):
+        """Initialize the LLM client for answer generation"""
+        from config import RAGConfig
+        
+        # Get LLM configuration from orchestration config
+        # This would be passed in from the main config
+        azure_endpoint = get_env_var('AZURE_OPENAI_ENDPOINT')
+        
+        if azure_endpoint:
+            # Use Azure OpenAI
+            api_key = get_env_var('AZURE_OPENAI_API_KEY')
+            api_version = get_env_var('AZURE_OPENAI_API_VERSION', '2024-02-15-preview')
+            
+            self.llm_client = openai.AzureOpenAI(
+                azure_endpoint=azure_endpoint,
+                api_key=api_key,
+                api_version=api_version
+            )
+        else:
+            # Use standard OpenAI
+            api_key = get_env_var('OPENAI_API_KEY')
+            self.llm_client = openai.OpenAI(api_key=api_key)
+    
+    async def query(
+        self, 
+        question: str, 
+        filters: Optional[Dict[str, Any]] = None, 
+        top_k: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Process a query and return results with generated answer"""
+        start_time = time.time()
+        
+        try:
+            # Use provided top_k or default from config
+            k = top_k or self.query_config.top_k
+            
+            # Search for relevant documents
+            search_results = await self.vector_db.search(
+                query=question,
+                top_k=k,
+                filters=filters
+            )
+            
+            if not search_results:
+                return {
+                    "answer": "I couldn't find any relevant information to answer your question.",
+                    "sources": [],
+                    "query_time": time.time() - start_time
+                }
+            
+            # Generate answer based on retrieved documents
+            answer = await self._generate_answer(question, search_results)
+            
+            # Format sources
+            sources = self._format_sources(search_results)
+            
+            return {
+                "answer": answer,
+                "sources": sources,
+                "query_time": time.time() - start_time
+            }
+            
+        except Exception as e:
+            return {
+                "answer": f"An error occurred while processing your query: {str(e)}",
+                "sources": [],
+                "query_time": time.time() - start_time
+            }
+    
+    async def _generate_answer(self, question: str, search_results: List[Dict[str, Any]]) -> str:
+        """Generate an answer based on the retrieved documents"""
+        try:
+            # Prepare context from search results
+            context = self._prepare_context(search_results)
+            
+            # Use prompt template if available, otherwise use default
+            if self.query_config.prompt_template:
+                prompt = self.query_config.prompt_template.format(
+                    context=context,
+                    question=question
+                )
+            else:
+                prompt = f"""
+Based on the following context, please answer the question. If the context doesn't contain enough information to answer the question, please say so.
+
+Context:
+{context}
+
+Question: {question}
+
+Answer:
+"""
+            
+            # Get LLM model from environment or use default
+            model = get_env_var('LLM_MODEL', 'gpt-3.5-turbo')
+            temperature = float(get_env_var('LLM_TEMPERATURE', '0.2'))
+            max_tokens = int(get_env_var('LLM_MAX_TOKENS', '1024'))
+            
+            # Generate response
+            response = self.llm_client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant that answers questions based on the provided context. Be accurate, concise, and only use information from the context."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+            
+            return response.choices[0].message.content.strip()
+            
+        except Exception as e:
+            print(f"Error generating answer: {str(e)}")
+            return f"I found some relevant information, but encountered an error while generating the answer: {str(e)}"
+    
+    def _prepare_context(self, search_results: List[Dict[str, Any]]) -> str:
+        """Prepare context from search results"""
+        context_parts = []
+        
+        for i, result in enumerate(search_results):
+            content = result.get('content', '')
+            metadata = result.get('metadata', {})
+            
+            # Add source information
+            source_info = []
+            if metadata.get('filename'):
+                source_info.append(f"File: {metadata['filename']}")
+            if metadata.get('page'):
+                source_info.append(f"Page: {metadata['page']}")
+            if metadata.get('title'):
+                source_info.append(f"Title: {metadata['title']}")
+            
+            source_str = " | ".join(source_info) if source_info else f"Source {i+1}"
+            
+            context_parts.append(f"[{source_str}]\\n{content}")
+        
+        # Join context with context window limit
+        context = "\\n\\n".join(context_parts)
+        
+        # Truncate if too long (rough estimate)
+        max_context_length = self.query_config.context_window or 2048
+        if len(context) > max_context_length * 4:  # Rough character estimate
+            context = context[:max_context_length * 4] + "..."
+        
+        return context
+    
+    def _format_sources(self, search_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Format search results as sources"""
+        sources = []
+        
+        for result in search_results:
+            source = {
+                "content": result.get('content', ''),
+                "score": result.get('score', 0.0),
+                "metadata": result.get('metadata', {}),
+                "id": result.get('id', '')
+            }
+            sources.append(source)
+        
+        return sources
+    
+    async def hybrid_search(
+        self, 
+        question: str, 
+        top_k: int = 5, 
+        filters: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        """Perform hybrid search combining semantic and keyword search"""
+        # This would implement hybrid search if supported by the vector database
+        # For now, fall back to semantic search
+        return await self.vector_db.search(question, top_k, filters)
+    
+    async def rerank_results(
+        self, 
+        question: str, 
+        results: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Rerank search results using cross-encoder or other methods"""
+        if self.query_config.reranker == "bm25":
+            # Implement BM25 reranking if available
+            pass
+        elif self.query_config.reranker == "cross-encoder":
+            # Implement cross-encoder reranking if available
+            pass
+        
+        # For now, return results as-is
+        return results
+    
+    async def get_answer_style(self, base_answer: str) -> str:
+        """Format answer according to configured style"""
+        style = self.query_config.answer_style or "concise"
+        
+        if style == "concise":
+            # Ensure answer is concise
+            if len(base_answer) > 500:
+                sentences = base_answer.split('. ')
+                if len(sentences) > 3:
+                    base_answer = '. '.join(sentences[:3]) + '.'
+        
+        elif style == "detailed":
+            # Add more detail if needed
+            pass
+        
+        elif style == "json":
+            # Format as JSON
+            import json
+            base_answer = json.dumps({"answer": base_answer}, indent=2)
+        
+        return base_answer

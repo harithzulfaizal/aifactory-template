@@ -1,0 +1,97 @@
+# RAG Template Application
+
+A comprehensive Retrieval-Augmented Generation (RAG) application with support for multiple vector databases and document sources.
+
+## Features
+
+- **Document Ingestion**: Upload files or integrate with SharePoint
+- **Multiple Vector Databases**: Azure AI Search, ChromaDB
+- **Advanced Chunking**: Fixed, semantic, and hybrid strategies
+- **Metadata Extraction**: Configurable field extraction and auto-extraction
+- **Semantic Search**: Powered by Azure OpenAI embeddings
+- **FastAPI REST API**: Complete API with documentation
+
+## Configuration
+
+This application is configured for:
+
+- **Vector Database**: {{ config.vector_db.type }}
+- **Document Source**: {{ config.ingestion.source_type }}
+- **Embedding Model**: {{ config.ingestion.embeddings.model }}
+- **Chunking Strategy**: {{ config.ingestion.chunking.method }} ({{ config.ingestion.chunking.chunk_size }} tokens)
+
+## Quick Start
+
+1. **Install Dependencies**:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. **Configure Environment**:
+   ```bash
+   cp .env.example .env
+   # Edit .env with your API keys and configuration
+   ```
+
+3. **Run the Application**:
+   ```bash
+   python main.py
+   ```
+
+4. **Access API Documentation**:
+   Open http://localhost:8000/docs in your browser
+
+## API Endpoints
+
+### Document Ingestion
+
+- `POST /ingest/upload` - Upload and process documents
+- `POST /ingest/sharepoint` - Ingest documents from SharePoint
+
+### Query and Search
+
+- `POST /query` - Query documents with semantic search
+- `GET /documents` - List all documents
+- `DELETE /documents` - Clear all documents
+
+### Management
+
+- `GET /health` - Health check
+- `GET /stats` - Database statistics
+
+## Supported File Formats
+
+- PDF documents
+- Microsoft Word documents (.docx)
+- Plain text files (.txt)
+- Images with OCR support (.png, .jpeg)
+
+## Environment Variables
+
+Refer to `.env.example` for all required environment variables including:
+
+- Azure OpenAI configuration
+- Vector database credentials
+- SharePoint settings (if applicable)
+
+## Docker Support
+
+Build and run with Docker:
+
+```bash
+docker build -t rag-app .
+docker run -p 8000:8000 --env-file .env rag-app
+```
+
+## Configuration
+
+The application is configured via `config.yaml`. Key settings include:
+
+- **Vector Database**: {{ config.vector_db.type }}
+- **Embedding Model**: {{ config.ingestion.embeddings.model }}
+- **Chunking**: {{ config.ingestion.chunking.method }} strategy with {{ config.ingestion.chunking.chunk_size }} token chunks
+- **Document Source**: {{ config.ingestion.source_type }}
+
+## Development
+
+This template provides a complete, production-ready RAG application that can be customized and extended based on your specific requirements.

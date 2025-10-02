@@ -1,0 +1,248 @@
+import os
+from typing import List, Dict, Any, Optional
+import chromadb
+from chromadb.config import Settings
+from chromadb.utils import embedding_functions
+
+from vector_db.base import VectorDBBase
+
+
+class ChromaDB(VectorDBBase):
+    """ChromaDB implementation for vector database"""
+    
+    def __init__(self, config, embedding_service):
+        super().__init__(config, embedding_service)
+        self.chroma_config = config.chroma
+        self.collection_name = config.index_name
+        
+        # Initialize ChromaDB client
+        self._initialize_client()
+        
+        # Get or create collection
+        self.collection = self._get_or_create_collection()
+    
+    def _initialize_client(self):
+        """Initialize ChromaDB client"""
+        if self.chroma_config.host and self.chroma_config.port:
+            # Remote ChromaDB server
+            self.client = chromadb.HttpClient(
+                host=self.chroma_config.host,
+                port=self.chroma_config.port,
+                ssl=self.chroma_config.ssl,
+                settings=Settings(
+                    anonymized_telemetry=False,
+                    allow_reset=True
+                )
+            )
+        else:
+            # Local ChromaDB
+            persist_directory = self.chroma_config.persist_directory or "./chroma_db"
+            os.makedirs(persist_directory, exist_ok=True)
+            
+            self.client = chromadb.PersistentClient(
+                path=persist_directory,
+                settings=Settings(
+                    anonymized_telemetry=False,
+                    allow_reset=True
+                )
+            )
+    
+    def _get_or_create_collection(self):
+        """Get or create a collection"""
+        try:
+            # Try to get existing collection
+            collection = self.client.get_collection(name=self.collection_name)
+            print(f"Using existing ChromaDB collection: {self.collection_name}")
+            return collection
+        except Exception:
+            # Create new collection
+            collection = self.client.create_collection(
+                name=self.collection_name,
+                metadata={"description": "RAG document collection"}
+            )
+            print(f"Created new ChromaDB collection: {self.collection_name}")
+            return collection
+    
+    async def ingest_documents(self, documents: List[Dict[str, Any]]) -> bool:
+        """Ingest documents into ChromaDB"""
+        try:
+            all_ids = []
+            all_documents = []
+            all_metadatas = []
+            
+            for doc in documents:
+                prepared_chunks = self._prepare_document_for_ingestion(doc)
+                
+                # Embed chunks
+                chunk_texts = [chunk['content'] for chunk in prepared_chunks]
+                embedded_chunks = await self._embed_chunks(chunk_texts)
+                
+                # Prepare data for ChromaDB
+                for i, (chunk, embedded_chunk) in enumerate(zip(prepared_chunks, embedded_chunks)):
+                    doc_id = f"{doc.get('filename', 'doc')}_{i}"
+                    
+                    all_ids.append(doc_id)
+                    all_documents.append(chunk['content'])
+                    all_metadatas.append({
+                        **chunk['metadata'],
+                        'filename': chunk['metadata'].get('filename', ''),
+                        'file_type': chunk['metadata'].get('file_type', ''),
+                        'chunk_index': chunk['metadata'].get('chunk_index', i),
+                        'page': chunk['metadata'].get('page'),
+                        'title': chunk['metadata'].get('title', ''),
+                        'source': chunk['metadata'].get('source', 'upload'),
+                        'document_id': chunk['metadata'].get('document_id', doc.get('filename', 'doc'))
+                    })
+            
+            # Add to collection in batches
+            batch_size = 100
+            for i in range(0, len(all_ids), batch_size):
+                batch_ids = all_ids[i:i + batch_size]
+                batch_documents = all_documents[i:i + batch_size]
+                batch_metadatas = all_metadatas[i:i + batch_size]
+                
+                self.collection.add(
+                    ids=batch_ids,
+                    documents=batch_documents,
+                    metadatas=batch_metadatas
+                )
+            
+            print(f"Successfully ingested {len(all_ids)} chunks into ChromaDB")
+            return True
+            
+        except Exception as e:
+            print(f"Error ingesting documents into ChromaDB: {str(e)}")
+            return False
+    
+    async def search(
+        self, 
+        query: str, 
+        top_k: int = 5, 
+        filters: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        """Search for similar documents"""
+        try:
+            # Prepare query arguments
+            query_args = {
+                "query_texts": [query],
+                "n_results": top_k
+            }
+            
+            # Add filters if provided
+            if filters:
+                query_args["where"] = filters
+            
+            # Perform search
+            results = self.collection.query(**query_args)
+            
+            # Format results
+            formatted_results = []
+            if results['ids'] and results['ids'][0]:
+                for i in range(len(results['ids'][0])):
+                    result = {
+                        "id": results['ids'][0][i],
+                        "content": results['documents'][0][i] if results['documents'] and results['documents'][0] else "",
+                        "score": results['distances'][0][i] if results['distances'] and results['distances'][0] else 0.0,
+                        "metadata": results['metadatas'][0][i] if results['metadatas'] and results['metadatas'][0] else {}
+                    }
+                    formatted_results.append(result)
+            
+            return formatted_results
+            
+        except Exception as e:
+            print(f"Error searching ChromaDB: {str(e)}")
+            return []
+    
+    async def health_check(self) -> bool:
+        """Check if ChromaDB is healthy"""
+        try:
+            # Try to get collection count
+            count = self.collection.count()
+            return True
+        except Exception as e:
+            print(f"ChromaDB health check failed: {str(e)}")
+            return False
+    
+    async def list_documents(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+        """List documents in the database"""
+        try:
+            # Get all documents from collection
+            results = self.collection.get(
+                limit=limit,
+                offset=offset,
+                include=["metadatas"]
+            )
+            
+            documents = []
+            if results['ids']:
+                for i in range(len(results['ids'])):
+                    doc = {
+                        "id": results['ids'][i],
+                        "metadata": results['metadatas'][i] if results['metadatas'] else {}
+                    }
+                    documents.append(doc)
+            
+            return documents
+            
+        except Exception as e:
+            print(f"Error listing documents from ChromaDB: {str(e)}")
+            return []
+    
+    async def clear_documents(self) -> bool:
+        """Clear all documents from the database"""
+        try:
+            # Delete the collection and recreate it
+            self.client.delete_collection(name=self.collection_name)
+            self.collection = self._get_or_create_collection()
+            return True
+        except Exception as e:
+            print(f"Error clearing ChromaDB documents: {str(e)}")
+            return False
+    
+    async def get_statistics(self) -> Dict[str, Any]:
+        """Get database statistics"""
+        try:
+            count = self.collection.count()
+            
+            # Get collection metadata
+            collection_info = self.collection.metadata or {}
+            
+            return {
+                "document_count": count,
+                "collection_name": self.collection_name,
+                "collection_metadata": collection_info,
+                "persist_directory": self.chroma_config.persist_directory if not self.chroma_config.host else f"remote:{self.chroma_config.host}:{self.chroma_config.port}"
+            }
+        except Exception as e:
+            print(f"Error getting ChromaDB statistics: {str(e)}")
+            return {}
+    
+    async def get_document_by_id(self, doc_id: str) -> Optional[Dict[str, Any]]:
+        """Get a specific document by ID"""
+        try:
+            results = self.collection.get(
+                ids=[doc_id],
+                include=["documents", "metadatas"]
+            )
+            
+            if results['ids'] and results['ids'][0]:
+                return {
+                    "id": results['ids'][0],
+                    "content": results['documents'][0] if results['documents'] and results['documents'][0] else "",
+                    "metadata": results['metadatas'][0] if results['metadatas'] and results['metadatas'][0] else {}
+                }
+            
+            return None
+            
+        except Exception as e:
+            print(f"Error getting document by ID from ChromaDB: {str(e)}")
+            return None
+    
+    async def delete_documents(self, doc_ids: List[str]) -> bool:
+        """Delete specific documents by IDs"""
+        try:
+            self.collection.delete(ids=doc_ids)
+            return True
+        except Exception as e:
+            print(f"Error deleting documents from ChromaDB: {str(e)}")
+            return False

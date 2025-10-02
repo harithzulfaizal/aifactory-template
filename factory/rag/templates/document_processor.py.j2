@@ -1,0 +1,217 @@
+import os
+import asyncio
+from typing import List, Dict, Any, Optional
+from pathlib import Path
+import PyPDF2
+from docx import Document
+import pytesseract
+from PIL import Image
+import tiktoken
+
+from utils.text_splitter import TextSplitter
+
+
+class DocumentProcessor:
+    """Processes various document formats and extracts text and metadata"""
+    
+    def __init__(self, ingestion_config):
+        self.ingestion_config = ingestion_config
+        self.text_splitter = TextSplitter(ingestion_config.chunking)
+        self.encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
+    
+    async def process_document(
+        self, 
+        file_path: str, 
+        filename: str, 
+        metadata_fields: List[Dict[str, Any]],
+        additional_metadata: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Process a single document and extract text and metadata"""
+        try:
+            # Determine file type
+            file_ext = Path(filename).suffix.lower().lstrip('.')
+            
+            # Extract text based on file type
+            if file_ext == 'pdf':
+                text_content = await self._extract_pdf_text(file_path)
+            elif file_ext == 'docx':
+                text_content = await self._extract_docx_text(file_path)
+            elif file_ext == 'txt':
+                text_content = await self._extract_txt_text(file_path)
+            elif file_ext in ['png', 'jpeg', 'jpg']:
+                text_content = await self._extract_image_text(file_path)
+            else:
+                print(f"Unsupported file type: {file_ext}")
+                return None
+            
+            if not text_content.strip():
+                print(f"No text content found in {filename}")
+                return None
+            
+            # Extract metadata
+            metadata = await self._extract_metadata(
+                file_path, filename, metadata_fields, text_content, additional_metadata
+            )
+            
+            # Split text into chunks
+            chunks = await self.text_splitter.split_text(text_content)
+            
+            # Create document object
+            document = {
+                'filename': filename,
+                'file_type': file_ext,
+                'content': text_content,
+                'chunks': chunks,
+                'metadata': metadata,
+                'chunk_count': len(chunks)
+            }
+            
+            return document
+            
+        except Exception as e:
+            print(f"Error processing document {filename}: {str(e)}")
+            return None
+    
+    async def _extract_pdf_text(self, file_path: str) -> str:
+        """Extract text from PDF file"""
+        text_content = []
+        
+        with open(file_path, 'rb') as file:
+            pdf_reader = PyPDF2.PdfReader(file)
+            
+            for page_num, page in enumerate(pdf_reader.pages):
+                try:
+                    page_text = page.extract_text()
+                    if page_text.strip():
+                        text_content.append(f"Page {page_num + 1}:\\n{page_text}")
+                except Exception as e:
+                    print(f"Error extracting text from page {page_num + 1}: {str(e)}")
+                    continue
+        
+        return "\\n\\n".join(text_content)
+    
+    async def _extract_docx_text(self, file_path: str) -> str:
+        """Extract text from DOCX file"""
+        try:
+            doc = Document(file_path)
+            text_content = []
+            
+            for paragraph in doc.paragraphs:
+                if paragraph.text.strip():
+                    text_content.append(paragraph.text)
+            
+            return "\\n".join(text_content)
+        except Exception as e:
+            print(f"Error extracting text from DOCX: {str(e)}")
+            return ""
+    
+    async def _extract_txt_text(self, file_path: str) -> str:
+        """Extract text from TXT file"""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as file:
+                return file.read()
+        except UnicodeDecodeError:
+            # Try with different encoding
+            try:
+                with open(file_path, 'r', encoding='latin-1') as file:
+                    return file.read()
+            except Exception as e:
+                print(f"Error reading TXT file: {str(e)}")
+                return ""
+        except Exception as e:
+            print(f"Error extracting text from TXT: {str(e)}")
+            return ""
+    
+    async def _extract_image_text(self, file_path: str) -> str:
+        """Extract text from image using OCR"""
+        try:
+            image = Image.open(file_path)
+            
+            # Configure Tesseract for better OCR
+            custom_config = r'--oem 3 --psm 6'
+            text = pytesseract.image_to_string(image, config=custom_config)
+            
+            return text.strip()
+        except Exception as e:
+            print(f"Error extracting text from image: {str(e)}")
+            return ""
+    
+    async def _extract_metadata(
+        self, 
+        file_path: str, 
+        filename: str, 
+        metadata_fields: List[Dict[str, Any]], 
+        text_content: str,
+        additional_metadata: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Extract metadata based on configured fields"""
+        metadata = {
+            'filename': filename,
+            'file_size': os.path.getsize(file_path),
+            'file_type': Path(filename).suffix.lower().lstrip('.'),
+        }
+        
+        # Add additional metadata if provided
+        if additional_metadata:
+            metadata.update(additional_metadata)
+        
+        # Extract configured metadata fields
+        for field in metadata_fields:
+            field_name = field['name']
+            field_type = field['type']
+            auto_extract = field.get('auto_extract', False)
+            
+            if field_name in metadata:
+                continue  # Already have this field
+            
+            if auto_extract:
+                extracted_value = await self._auto_extract_field(
+                    field_name, field_type, text_content, metadata
+                )
+                if extracted_value is not None:
+                    metadata[field_name] = extracted_value
+            elif field.get('default_value') is not None:
+                metadata[field_name] = field['default_value']
+        
+        return metadata
+    
+    async def _auto_extract_field(
+        self, 
+        field_name: str, 
+        field_type: str, 
+        text_content: str, 
+        existing_metadata: Dict[str, Any]
+    ) -> Any:
+        """Auto-extract a specific metadata field"""
+        try:
+            if field_name == 'title':
+                # Try to extract title from first few lines
+                lines = text_content.split('\\n')[:5]
+                for line in lines:
+                    line = line.strip()
+                    if len(line) > 10 and len(line) < 200:
+                        return line
+                return Path(existing_metadata.get('filename', '')).stem
+            
+            elif field_name == 'page':
+                # Count pages in PDF or estimate from content
+                if existing_metadata.get('file_type') == 'pdf':
+                    try:
+                        with open(existing_metadata.get('file_path', ''), 'rb') as file:
+                            pdf_reader = PyPDF2.PdfReader(file)
+                            return len(pdf_reader.pages)
+                    except:
+                        pass
+                # Estimate pages based on content length
+                estimated_pages = max(1, len(text_content) // 2000)
+                return estimated_pages
+            
+            elif field_name == 'content':
+                return text_content
+            
+            # Add more auto-extraction logic as needed
+            return None
+            
+        except Exception as e:
+            print(f"Error auto-extracting field {field_name}: {str(e)}")
+            return None

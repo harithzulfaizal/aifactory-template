@@ -1,0 +1,184 @@
+import os
+import asyncio
+from typing import List, Optional, Dict, Any
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, BackgroundTasks
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+import uvicorn
+
+from config import RAGConfig
+from ingestion.upload_handler import UploadHandler
+from ingestion.sharepoint_handler import SharePointHandler
+from ingestion.document_processor import DocumentProcessor
+from vector_db.factory import VectorDBFactory
+from retrieval.semantic_search import SemanticSearch
+from utils.embeddings import EmbeddingService
+
+# Load configuration
+config = RAGConfig.from_yaml("config.yaml")
+
+# Initialize services
+embedding_service = EmbeddingService(config.ingestion.embeddings)
+vector_db = VectorDBFactory.create(config.vector_db, embedding_service)
+document_processor = DocumentProcessor(config.ingestion)
+
+# Initialize handlers based on source type
+upload_handler = UploadHandler(document_processor, vector_db)
+sharepoint_handler = SharePointHandler(document_processor, vector_db) if config.ingestion.sharepoint else None
+semantic_search = SemanticSearch(vector_db, embedding_service, config.query)
+
+app = FastAPI(
+    title="RAG Template API",
+    description="Retrieval-Augmented Generation API with document ingestion and query capabilities",
+    version="1.0.0"
+)
+
+class QueryRequest(BaseModel):
+    question: str
+    filters: Optional[Dict[str, Any]] = None
+    top_k: Optional[int] = None
+
+class QueryResponse(BaseModel):
+    answer: str
+    sources: List[Dict[str, Any]]
+    query_time: float
+
+@app.get("/")
+async def root():
+    return {
+        "message": "RAG Template API",
+        "version": "1.0.0",
+        "config": {
+            "vector_db_type": config.vector_db.type,
+            "source_type": config.ingestion.source_type,
+            "embedding_model": config.ingestion.embeddings.model
+        }
+    }
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "vector_db_connected": await vector_db.health_check()}
+
+@app.post("/ingest/upload")
+async def upload_documents(
+    background_tasks: BackgroundTasks,
+    files: List[UploadFile] = File(...)
+):
+    """
+    Upload and process documents for ingestion into the vector database.
+    Supports PDF, DOCX, TXT, PNG, and JPEG formats.
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+    
+    # Validate file types
+    supported_types = config.ingestion.file_types
+    for file in files:
+        file_ext = file.filename.split('.')[-1].lower() if file.filename else ""
+        if file_ext not in supported_types:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"File type {file_ext} not supported. Supported types: {supported_types}"
+            )
+    
+    try:
+        # Process files in background
+        background_tasks.add_task(
+            upload_handler.process_files, 
+            files,
+            config.ingestion.metadata.fields
+        )
+        
+        return {
+            "message": f"Upload started for {len(files)} files",
+            "files": [file.filename for file in files]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+@app.post("/ingest/sharepoint")
+async def ingest_sharepoint(background_tasks: BackgroundTasks):
+    """
+    Ingest documents from SharePoint using Microsoft Graph API.
+    Requires SharePoint configuration in config.yaml
+    """
+    if not sharepoint_handler:
+        raise HTTPException(
+            status_code=400, 
+            detail="SharePoint not configured. Please configure SharePoint settings in config.yaml"
+        )
+    
+    try:
+        background_tasks.add_task(
+            sharepoint_handler.process_sharepoint_documents,
+            config.ingestion.metadata.fields
+        )
+        
+        return {
+            "message": "SharePoint ingestion started",
+            "site_url": config.ingestion.sharepoint.site_url,
+            "folder_path": config.ingestion.sharepoint.folder_path or "root"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"SharePoint ingestion failed: {str(e)}")
+
+@app.post("/query", response_model=QueryResponse)
+async def query_documents(request: QueryRequest):
+    """
+    Query the document database using semantic search.
+    Returns relevant documents and generated answers.
+    """
+    try:
+        result = await semantic_search.query(
+            question=request.question,
+            filters=request.filters or config.query.filters,
+            top_k=request.top_k or config.query.top_k
+        )
+        
+        return QueryResponse(**result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
+
+@app.get("/documents")
+async def list_documents(
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0)
+):
+    """
+    List documents in the vector database with pagination.
+    """
+    try:
+        documents = await vector_db.list_documents(limit=limit, offset=offset)
+        return {"documents": documents, "total": len(documents)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(e)}")
+
+@app.delete("/documents")
+async def clear_documents():
+    """
+    Clear all documents from the vector database.
+    """
+    try:
+        await vector_db.clear_documents()
+        return {"message": "All documents cleared successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to clear documents: {str(e)}")
+
+@app.get("/stats")
+async def get_statistics():
+    """
+    Get statistics about the vector database and ingested documents.
+    """
+    try:
+        stats = await vector_db.get_statistics()
+        return stats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get statistics: {str(e)}")
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True
+    )

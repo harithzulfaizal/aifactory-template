@@ -1,0 +1,160 @@
+import asyncio
+from typing import List, Dict, Any, Optional
+import msal
+import requests
+from io import BytesIO
+
+from ingestion.document_processor import DocumentProcessor
+from vector_db.base import VectorDBBase
+
+
+class SharePointHandler:
+    """Handles SharePoint document ingestion using Microsoft Graph API"""
+    
+    def __init__(self, document_processor: DocumentProcessor, vector_db: VectorDBBase):
+        self.document_processor = document_processor
+        self.vector_db = vector_db
+        self.access_token = None
+    
+    async def process_sharepoint_documents(self, metadata_fields: List[Dict[str, Any]]):
+        """Process documents from SharePoint and ingest them into the vector database"""
+        try:
+            # Get access token
+            await self._get_access_token()
+            
+            # Get documents from SharePoint
+            documents = await self._fetch_sharepoint_documents()
+            
+            # Process and ingest documents
+            processed_documents = []
+            for doc_info in documents:
+                try:
+                    document = await self._process_sharepoint_document(doc_info, metadata_fields)
+                    if document:
+                        processed_documents.append(document)
+                except Exception as e:
+                    print(f"Error processing SharePoint document {doc_info.get('name', 'unknown')}: {str(e)}")
+                    continue
+            
+            # Batch ingest documents
+            if processed_documents:
+                await self.vector_db.ingest_documents(processed_documents)
+                print(f"Successfully ingested {len(processed_documents)} SharePoint documents")
+                
+        except Exception as e:
+            print(f"SharePoint ingestion failed: {str(e)}")
+            raise
+    
+    async def _get_access_token(self):
+        """Get Microsoft Graph access token using client credentials flow"""
+        # This would be implemented with actual SharePoint configuration
+        # For now, this is a placeholder that would need real implementation
+        config = self._get_sharepoint_config()
+        
+        authority = f"https://login.microsoftonline.com/{config['tenant_id']}"
+        app = msal.ConfidentialClientApplication(
+            client_id=config['client_id'],
+            client_credential=config['client_secret'],
+            authority=authority
+        )
+        
+        scope = ["https://graph.microsoft.com/.default"]
+        result = app.acquire_token_for_client(scopes=scope)
+        
+        if "access_token" in result:
+            self.access_token = result["access_token"]
+        else:
+            raise Exception(f"Failed to get access token: {result.get('error_description', 'Unknown error')}")
+    
+    async def _fetch_sharepoint_documents(self) -> List[Dict[str, Any]]:
+        """Fetch document list from SharePoint"""
+        config = self._get_sharepoint_config()
+        
+        # Construct Graph API URL
+        site_url = config['site_url']
+        folder_path = config.get('folder_path', '')
+        
+        # Get site ID (simplified - would need actual implementation)
+        headers = {
+            'Authorization': f'Bearer {self.access_token}',
+            'Content-Type': 'application/json'
+        }
+        
+        # This is a simplified implementation
+        # Real implementation would need proper site discovery and folder traversal
+        graph_url = f"https://graph.microsoft.com/v1.0/sites/{site_url}/drive/root/children"
+        
+        response = requests.get(graph_url, headers=headers)
+        response.raise_for_status()
+        
+        data = response.json()
+        documents = []
+        
+        for item in data.get('value', []):
+            if item.get('file') and item['name'].lower().endswith(tuple(self._get_supported_file_types())):
+                documents.append({
+                    'id': item['id'],
+                    'name': item['name'],
+                    'download_url': item.get('@microsoft.graph.downloadUrl'),
+                    'size': item.get('size', 0),
+                    'created_datetime': item.get('createdDateTime'),
+                    'last_modified_datetime': item.get('lastModifiedDateTime')
+                })
+        
+        return documents
+    
+    async def _process_sharepoint_document(self, doc_info: Dict[str, Any], metadata_fields: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Download and process a single SharePoint document"""
+        try:
+            # Download document content
+            headers = {'Authorization': f'Bearer {self.access_token}'}
+            response = requests.get(doc_info['download_url'], headers=headers)
+            response.raise_for_status()
+            
+            # Save to temporary file
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{doc_info['name'].split('.')[-1]}") as temp_file:
+                temp_file.write(response.content)
+                temp_file_path = temp_file.name
+            
+            try:
+                # Process document
+                document = await self.document_processor.process_document(
+                    temp_file_path,
+                    doc_info['name'],
+                    metadata_fields,
+                    additional_metadata={
+                        'source': 'sharepoint',
+                        'sharepoint_id': doc_info['id'],
+                        'created_datetime': doc_info.get('created_datetime'),
+                        'last_modified_datetime': doc_info.get('last_modified_datetime'),
+                        'file_size': doc_info.get('size')
+                    }
+                )
+                return document
+            finally:
+                # Clean up temporary file
+                import os
+                if os.path.exists(temp_file_path):
+                    os.unlink(temp_file_path)
+                    
+        except Exception as e:
+            print(f"Error processing SharePoint document {doc_info['name']}: {str(e)}")
+            return None
+    
+    def _get_sharepoint_config(self) -> Dict[str, Any]:
+        """Get SharePoint configuration from environment or config"""
+        # This would read from actual config in real implementation
+        from config import get_env_var
+        
+        return {
+            'site_url': get_env_var('SHAREPOINT_SITE_URL'),
+            'tenant_id': get_env_var('SHAREPOINT_TENANT_ID'),
+            'client_id': get_env_var('SHAREPOINT_CLIENT_ID'),
+            'client_secret': get_env_var('SHAREPOINT_CLIENT_SECRET'),
+            'folder_path': get_env_var('SHAREPOINT_FOLDER_PATH', '')
+        }
+    
+    def _get_supported_file_types(self) -> List[str]:
+        """Get list of supported file extensions"""
+        return ['pdf', 'docx', 'txt', 'png', 'jpeg', 'jpg']

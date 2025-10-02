@@ -1,0 +1,156 @@
+import re
+from typing import List
+import tiktoken
+
+
+class TextSplitter:
+    """Splits text into chunks based on configured strategy"""
+    
+    def __init__(self, chunking_config):
+        self.method = chunking_config.method
+        self.chunk_size = chunking_config.chunk_size
+        self.overlap = chunking_config.overlap
+        self.encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
+    
+    async def split_text(self, text: str) -> List[str]:
+        """Split text into chunks based on the configured method"""
+        if self.method == "fixed":
+            return await self._fixed_size_split(text)
+        elif self.method == "semantic":
+            return await self._semantic_split(text)
+        elif self.method == "hybrid":
+            return await self._hybrid_split(text)
+        else:
+            raise ValueError(f"Unsupported chunking method: {self.method}")
+    
+    async def _fixed_size_split(self, text: str) -> List[str]:
+        """Split text into fixed-size chunks based on token count"""
+        # Encode text to tokens
+        tokens = self.encoding.encode(text)
+        
+        if len(tokens) <= self.chunk_size:
+            return [text]
+        
+        chunks = []
+        start_idx = 0
+        
+        while start_idx < len(tokens):
+            # Calculate end index for this chunk
+            end_idx = min(start_idx + self.chunk_size, len(tokens))
+            
+            # Decode tokens back to text
+            chunk_tokens = tokens[start_idx:end_idx]
+            chunk_text = self.encoding.decode(chunk_tokens)
+            
+            chunks.append(chunk_text)
+            
+            # Calculate next start index with overlap
+            if end_idx >= len(tokens):
+                break
+            
+            start_idx = max(start_idx + 1, end_idx - self.overlap)
+        
+        return chunks
+    
+    async def _semantic_split(self, text: str) -> List[str]:
+        """Split text based on semantic boundaries (paragraphs, sentences)"""
+        # Split into paragraphs first
+        paragraphs = re.split(r'\\n\\s*\\n', text)
+        chunks = []
+        current_chunk = ""
+        
+        for paragraph in paragraphs:
+            paragraph = paragraph.strip()
+            if not paragraph:
+                continue
+            
+            # Check if adding this paragraph would exceed chunk size
+            test_chunk = current_chunk + "\\n\\n" + paragraph if current_chunk else paragraph
+            token_count = len(self.encoding.encode(test_chunk))
+            
+            if token_count <= self.chunk_size:
+                # Add to current chunk
+                if current_chunk:
+                    current_chunk += "\\n\\n" + paragraph
+                else:
+                    current_chunk = paragraph
+            else:
+                # Save current chunk if it exists
+                if current_chunk:
+                    chunks.append(current_chunk)
+                
+                # Start new chunk with paragraph
+                if len(self.encoding.encode(paragraph)) <= self.chunk_size:
+                    current_chunk = paragraph
+                else:
+                    # Paragraph is too long, split it
+                    sub_chunks = await self._split_long_paragraph(paragraph)
+                    chunks.extend(sub_chunks[:-1])
+                    current_chunk = sub_chunks[-1] if sub_chunks else ""
+        
+        # Add the last chunk
+        if current_chunk:
+            chunks.append(current_chunk)
+        
+        return chunks
+    
+    async def _hybrid_split(self, text: str) -> List[str]:
+        """Combine semantic and fixed-size splitting for optimal results"""
+        # First try semantic split
+        semantic_chunks = await self._semantic_split(text)
+        
+        # Check if any chunks are still too large
+        final_chunks = []
+        
+        for chunk in semantic_chunks:
+            token_count = len(self.encoding.encode(chunk))
+            
+            if token_count <= self.chunk_size:
+                final_chunks.append(chunk)
+            else:
+                # Split large chunks using fixed-size method
+                sub_chunks = await self._fixed_size_split(chunk)
+                final_chunks.extend(sub_chunks)
+        
+        return final_chunks
+    
+    async def _split_long_paragraph(self, paragraph: str) -> List[str]:
+        """Split a paragraph that's too long using sentence boundaries"""
+        # Split into sentences
+        sentences = re.split(r'(?<=[.!?])\\s+', paragraph)
+        chunks = []
+        current_chunk = ""
+        
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            
+            test_chunk = current_chunk + " " + sentence if current_chunk else sentence
+            token_count = len(self.encoding.encode(test_chunk))
+            
+            if token_count <= self.chunk_size:
+                if current_chunk:
+                    current_chunk += " " + sentence
+                else:
+                    current_chunk = sentence
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk)
+                
+                # If sentence itself is too long, use fixed-size split
+                if len(self.encoding.encode(sentence)) > self.chunk_size:
+                    sub_chunks = await self._fixed_size_split(sentence)
+                    chunks.extend(sub_chunks[:-1])
+                    current_chunk = sub_chunks[-1] if sub_chunks else ""
+                else:
+                    current_chunk = sentence
+        
+        if current_chunk:
+            chunks.append(current_chunk)
+        
+        return chunks if chunks else [""]
+    
+    def count_tokens(self, text: str) -> int:
+        """Count the number of tokens in text"""
+        return len(self.encoding.encode(text))

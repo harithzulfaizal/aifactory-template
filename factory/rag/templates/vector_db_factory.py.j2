@@ -1,0 +1,54 @@
+from typing import Any
+from vector_db.base import VectorDBBase
+from vector_db.azure_search import AzureAISearch
+from vector_db.chroma_db import ChromaDB
+
+
+class VectorDBFactory:
+    """Factory class for creating vector database instances"""
+    
+    @staticmethod
+    def create(config: Any, embedding_service) -> VectorDBBase:
+        """Create a vector database instance based on configuration"""
+        db_type = config.type.lower()
+        
+        if db_type == "azure_search":
+            if not config.azure_search:
+                raise ValueError("Azure Search configuration is required for Azure Search vector database")
+            return AzureAISearch(config, embedding_service)
+        
+        elif db_type == "chroma":
+            if not config.chroma:
+                raise ValueError("Chroma configuration is required for Chroma vector database")
+            return ChromaDB(config, embedding_service)
+        
+        else:
+            raise ValueError(f"Unsupported vector database type: {db_type}")
+    
+    @staticmethod
+    def get_supported_types() -> list:
+        """Get list of supported vector database types"""
+        return ["azure_search", "chroma"]
+    
+    @staticmethod
+    def validate_config(config: Any) -> bool:
+        """Validate vector database configuration"""
+        db_type = config.type.lower()
+        
+        if db_type == "azure_search":
+            return (
+                hasattr(config, 'azure_search') and 
+                config.azure_search and
+                hasattr(config.azure_search, 'endpoint') and
+                hasattr(config.azure_search, 'api_key') and
+                config.index_name
+            )
+        
+        elif db_type == "chroma":
+            return (
+                hasattr(config, 'chroma') and 
+                config.chroma and
+                config.index_name
+            )
+        
+        return False

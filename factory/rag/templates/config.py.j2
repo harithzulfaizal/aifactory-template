@@ -1,0 +1,28 @@
+import os
+import yaml
+from typing import Dict, Any
+from pydantic import BaseModel
+
+class RAGConfig(BaseModel):
+    """Configuration class for RAG application"""
+    
+    @classmethod
+    def from_yaml(cls, file_path: str) -> "RAGConfig":
+        """Load configuration from YAML file"""
+        with open(file_path, 'r') as file:
+            config_data = yaml.safe_load(file)
+        return cls(**config_data)
+    
+    @classmethod
+    def from_dict(cls, config_dict: Dict[str, Any]) -> "RAGConfig":
+        """Load configuration from dictionary"""
+        return cls(**config_dict)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert configuration to dictionary"""
+        return self.model_dump()
+
+# Environment variable helper
+def get_env_var(key: str, default: str = None) -> str:
+    """Get environment variable with optional default"""
+    return os.getenv(key, default)

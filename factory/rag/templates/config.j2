@@ -1,0 +1,75 @@
+# RAG Configuration
+ingestion:
+  source_type: {{ ingestion.source_type }}
+  file_types: {{ ingestion.file_types | tojson }}
+  {% if ingestion.sharepoint %}
+  sharepoint:
+    site_url: {{ ingestion.sharepoint.site_url }}
+    tenant_id: {{ ingestion.sharepoint.tenant_id }}
+    client_id: {{ ingestion.sharepoint.client_id }}
+    client_secret: {{ ingestion.sharepoint.client_secret }}
+    folder_path: {{ ingestion.sharepoint.folder_path }}
+    recursive: {{ ingestion.sharepoint.recursive }}
+  {% endif %}
+  chunking:
+    method: {{ ingestion.chunking.method }}
+    chunk_size: {{ ingestion.chunking.chunk_size }}
+    overlap: {{ ingestion.chunking.overlap }}
+  metadata:
+    fields:
+    {% for field in ingestion.metadata.fields %}
+    - name: {{ field.name }}
+      type: {{ field.type }}
+      description: {{ field.description }}
+      auto_extract: {{ field.auto_extract }}
+      default_value: {{ field.default_value }}
+      required: {{ field.required }}
+    {% endfor %}
+  embeddings:
+    model: {{ ingestion.embeddings.model }}
+    dimension: {{ ingestion.embeddings.dimension }}
+    azure_endpoint: {{ ingestion.embeddings.azure_endpoint }}
+    api_version: {{ ingestion.embeddings.api_version }}
+
+vector_db:
+  type: {{ vector_db.type }}
+  index_name: {{ vector_db.index_name }}
+  distance_metric: {{ vector_db.distance_metric }}
+  dynamic_fields: {{ vector_db.dynamic_fields }}
+  {% if vector_db.azure_search %}
+  azure_search:
+    endpoint: {{ vector_db.azure_search.endpoint }}
+    api_key: {{ vector_db.azure_search.api_key }}
+    api_version: {{ vector_db.azure_search.api_version }}
+    semantic_configuration: {{ vector_db.azure_search.semantic_configuration }}
+  {% endif %}
+  {% if vector_db.chroma %}
+  chroma:
+    persist_directory: {{ vector_db.chroma.persist_directory }}
+    host: {{ vector_db.chroma.host }}
+    port: {{ vector_db.chroma.port }}
+    ssl: {{ vector_db.chroma.ssl }}
+  {% endif %}
+
+query:
+  retrieval_type: {{ query.retrieval_type }}
+  top_k: {{ query.top_k }}
+  filters: {{ query.filters | tojson if query.filters else None }}
+  reranker: {{ query.reranker }}
+  prompt_template: {{ query.prompt_template }}
+  context_window: {{ query.context_window }}
+  answer_style: {{ query.answer_style }}
+
+{% if extraction %}
+extraction:
+  schema: {{ extraction.schema | tojson }}
+  granularity: {{ extraction.granularity }}
+  output_format: {{ extraction.output_format }}
+{% endif %}
+
+orchestration:
+  llm_provider: {{ orchestration.llm_provider }}
+  llm_model: {{ orchestration.llm_model }}
+  temperature: {{ orchestration.temperature }}
+  max_tokens: {{ orchestration.max_tokens }}
+  api_key: {{ orchestration.api_key }}
